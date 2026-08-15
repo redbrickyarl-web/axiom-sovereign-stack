@@ -9,29 +9,31 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const SLOTS: usize = 64;
 /// Hopscotch neighborhood size.
 const HOP: usize = 8;
+/// Empty sentinel (primitive u64, not Atomic, to avoid interior-mutability lint).
+const EMPTY: u64 = 0;
 
 /// A single hopscotch bucket holding a 64-bit presence bitmap
 /// and a small neighborhood of keys.
 pub struct ZahIndex {
     /// Presence bitmaps for each slot.
-    bitmaps: [AtomicU64; SLOTS],
+    bitmaps: Vec<AtomicU64>,
     /// Key storage (0 means empty).
-    keys: [AtomicU64; SLOTS],
+    keys: Vec<AtomicU64>,
 }
 
 impl ZahIndex {
     pub fn new() -> Self {
-        // AtomicU64::new is const, so we can initialize the arrays directly.
-        const EMPTY: AtomicU64 = AtomicU64::new(0);
-        Self {
-            bitmaps: [EMPTY; SLOTS],
-            keys: [EMPTY; SLOTS],
+        let mut bitmaps = Vec::with_capacity(SLOTS);
+        let mut keys = Vec::with_capacity(SLOTS);
+        for _ in 0..SLOTS {
+            bitmaps.push(AtomicU64::new(EMPTY));
+            keys.push(AtomicU64::new(EMPTY));
         }
+        Self { bitmaps, keys }
     }
 
     /// Hash a key into a slot index.
     fn hash(key: u64) -> usize {
-        // Simple multiplicative hash.
         let h = key.wrapping_mul(0x9E3779B97F4A7C15);
         (h as usize) & (SLOTS - 1)
     }
@@ -39,25 +41,22 @@ impl ZahIndex {
     /// Attempt to insert a key. Returns true on success, false if no space
     /// found within the hopscotch neighborhood.
     pub fn insert(&self, key: u64) -> bool {
-        if key == 0 {
+        if key == EMPTY {
             return false; // 0 is reserved as empty marker
         }
 
         let start = Self::hash(key);
 
-        // First try to find an empty slot in the neighborhood.
         for i in 0..HOP {
             let idx = (start + i) & (SLOTS - 1);
 
-            // Try to claim an empty key slot.
             match self.keys[idx].compare_exchange(
-                0,
+                EMPTY,
                 key,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    // Set the corresponding bit in the start bucket's bitmap.
                     let bit = 1u64 << i;
                     self.bitmaps[start].fetch_or(bit, Ordering::Release);
                     return true;
@@ -71,7 +70,7 @@ impl ZahIndex {
 
     /// Check whether a key is present.
     pub fn contains(&self, key: u64) -> bool {
-        if key == 0 {
+        if key == EMPTY {
             return false;
         }
 
@@ -91,7 +90,7 @@ impl ZahIndex {
 
     /// Remove a key if present. Returns true if the key was found and removed.
     pub fn remove(&self, key: u64) -> bool {
-        if key == 0 {
+        if key == EMPTY {
             return false;
         }
 
@@ -103,7 +102,7 @@ impl ZahIndex {
                 let idx = (start + i) & (SLOTS - 1);
                 match self.keys[idx].compare_exchange(
                     key,
-                    0,
+                    EMPTY,
                     Ordering::AcqRel,
                     Ordering::Acquire,
                 ) {
