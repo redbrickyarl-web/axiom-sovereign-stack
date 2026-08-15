@@ -1,8 +1,7 @@
 #[cfg(test)]
 mod tests {
     use axiom_sovereign_stack::cosmic_queue::{CosmicQueue, PacketFrame};
-    use axiom_sovereign_stack::primitives::ZcssRing;
-    use axiom_sovereign_stack::primitives::BcpScheduler;
+    use axiom_sovereign_stack::primitives::{ZcssRing, BcpScheduler, TscBedr, ZahIndex};
     use axiom_sovereign_stack::EdgeAIPipeline;
     use axiom_sovereign_stack::PredatorGate;
 
@@ -40,6 +39,11 @@ mod tests {
         scheduler.set_priority(3);
 
         assert_eq!(scheduler.next_highest_priority(), Some(12));
+        assert_eq!(scheduler.active_count(), 3);
+        assert!(!scheduler.is_empty());
+
+        scheduler.clear_priority(12);
+        assert_eq!(scheduler.next_highest_priority(), Some(5));
     }
 
     #[test]
@@ -56,5 +60,25 @@ mod tests {
     fn test_predator_gate_validation() {
         let gate = PredatorGate::new(0xDEADBEEF);
         assert!(gate.validate_order_packet(0x12345678));
+    }
+
+    #[test]
+    fn test_tsc_bedr_epoch() {
+        let bedr = TscBedr::new();
+        let e1 = bedr.current_epoch();
+        let e2 = bedr.tick();
+        assert!(e2 > e1);
+        assert_eq!(bedr.pending(), 0);
+    }
+
+    #[test]
+    fn test_zah_index_insert_contains() {
+        let idx = ZahIndex::new();
+        assert!(idx.insert(0xABCDu64));
+        assert!(idx.contains(0xABCDu64));
+        assert!(!idx.contains(0x1234u64));
+
+        assert!(idx.remove(0xABCDu64));
+        assert!(!idx.contains(0xABCDu64));
     }
 }
