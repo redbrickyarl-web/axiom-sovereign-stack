@@ -1,22 +1,22 @@
 /// Bit-Sliced Window-Parallel Multiscalar Accumulator (BWP-MSM)
 /// Accelerates multiscalar multiplication via bit-slicing and parallel window buckets.
-/// Uses 4-wide unrolled accumulation for improved throughput.
 pub struct BwpMsmAccumulator {
     window_bits: usize,
-    buckets_len: usize,
+    _buckets_len: usize,
 }
 
 impl BwpMsmAccumulator {
     pub fn new(window_bits: usize) -> Self {
-        let buckets_len = 1 << window_bits;
+        let _buckets_len = 1 << window_bits;
         Self {
             window_bits,
-            buckets_len,
+            _buckets_len,
         }
     }
 
     /// Evaluates bit-sliced window accumulation across scalar windows.
     /// Processes 4 (scalar, point) pairs per iteration.
+    #[inline(always)]
     pub fn accumulate_slice(
         &self,
         scalars: &[u64],
@@ -26,38 +26,26 @@ impl BwpMsmAccumulator {
         assert_eq!(scalars.len(), points_x.len());
         assert_eq!(points_x.len(), points_y.len());
 
-        let mask = (1u64 << self.window_bits) - 1;
-        let mut acc_x = 0.0f64;
-        let mut acc_y = 0.0f64;
+        let mut acc_x = 0.0;
+        let mut acc_y = 0.0;
 
-        // 4-wide unrolled accumulation
-        let len = scalars.len();
+        let chunks_len = scalars.len() & !3;
         let mut i = 0;
 
-        while i + 4 <= len {
-            let w0 = (scalars[i] & mask) as f64;
-            let w1 = (scalars[i + 1] & mask) as f64;
-            let w2 = (scalars[i + 2] & mask) as f64;
-            let w3 = (scalars[i + 3] & mask) as f64;
-
-            acc_x += points_x[i] * w0
-                + points_x[i + 1] * w1
-                + points_x[i + 2] * w2
-                + points_x[i + 3] * w3;
-
-            acc_y += points_y[i] * w0
-                + points_y[i + 1] * w1
-                + points_y[i + 2] * w2
-                + points_y[i + 3] * w3;
-
+        while i < chunks_len {
+            for j in 0..4 {
+                let idx = i + j;
+                let scalar_weight = (scalars[idx] & ((1 << self.window_bits) - 1)) as f64;
+                acc_x += points_x[idx] * scalar_weight;
+                acc_y += points_y[idx] * scalar_weight;
+            }
             i += 4;
         }
 
-        // Remainder
-        while i < len {
-            let w = (scalars[i] & mask) as f64;
-            acc_x += points_x[i] * w;
-            acc_y += points_y[i] * w;
+        while i < scalars.len() {
+            let scalar_weight = (scalars[i] & ((1 << self.window_bits) - 1)) as f64;
+            acc_x += points_x[i] * scalar_weight;
+            acc_y += points_y[i] * scalar_weight;
             i += 1;
         }
 
