@@ -3,7 +3,8 @@ mod tests {
     use axiom_sovereign_stack::cosmic_queue::{CosmicQueue, PacketFrame};
     use axiom_sovereign_stack::primitives::{ZcssRing, BcpScheduler, TscBedr, ZahIndex};
     use axiom_sovereign_stack::EdgeAIPipeline;
-    use axiom_sovereign_stack::PredatorGate;
+    use axiom_sovereign_stack::{PredatorGate, OrderPacket};
+    use axiom_sovereign_stack::{BwpMsmAccumulator, BssDecoder};
 
     #[test]
     fn test_cosmic_queue_flow() {
@@ -57,9 +58,21 @@ mod tests {
     }
 
     #[test]
-    fn test_predator_gate_validation() {
-        let gate = PredatorGate::new(0xDEADBEEF);
+    fn test_predator_gate_pipeline() {
+        let gate = PredatorGate::new(0xDEADBEEF, 16);
         assert!(gate.validate_order_packet(0x12345678));
+
+        let packet = OrderPacket {
+            order_id: 1,
+            signature: 0x12345678,
+            price: 1000,
+            volume: 50,
+        };
+
+        assert!(gate.submit_order(packet).is_ok());
+        let polled = gate.poll_next_order().expect("Should poll order");
+        assert_eq!(polled.order_id, 1);
+        assert_eq!(polled.price, 1000);
     }
 
     #[test]
@@ -80,5 +93,24 @@ mod tests {
 
         assert!(idx.remove(0xABCDu64));
         assert!(!idx.contains(0xABCDu64));
+    }
+
+    #[test]
+    fn test_bwp_msm_accumulate() {
+        let msm = BwpMsmAccumulator::new(4);
+        let scalars = vec![3u64, 7];
+        let xs = vec![1.0, 2.0];
+        let ys = vec![3.0, 4.0];
+        let (ax, ay) = msm.accumulate_slice(&scalars, &xs, &ys);
+        assert!(ax > 0.0);
+        assert!(ay > 0.0);
+    }
+
+    #[test]
+    fn test_bss_decoder() {
+        let decoder = BssDecoder::new(8);
+        let syndrome = vec![0xAAu8, 0x55];
+        let corrected = decoder.decode_syndrome(&syndrome);
+        assert_eq!(corrected.len(), 2);
     }
 }
