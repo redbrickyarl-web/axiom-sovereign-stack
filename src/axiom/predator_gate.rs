@@ -4,7 +4,7 @@ use std::sync::Arc;
 pub struct PredatorGate {
     node_id: u64,
     order_ring: Arc<ZcssRing<OrderPacket>>,
-    index: ZahIndex,
+    _index: ZahIndex,
 }
 
 #[derive(Clone, Debug)]
@@ -20,7 +20,7 @@ impl PredatorGate {
         Self {
             node_id,
             order_ring: Arc::new(ZcssRing::new(ring_capacity)),
-            index: ZahIndex::new(),
+            _index: ZahIndex::new(),
         }
     }
 
@@ -36,7 +36,6 @@ impl PredatorGate {
     /// O(1) atomic SIMD validation stub
     #[inline(always)]
     pub fn validate_order_packet(&self, packet_sig: u64) -> bool {
-        // SIMD-aligned XOR check against sovereign node authority
         (packet_sig ^ self.node_id) != 0
     }
 
