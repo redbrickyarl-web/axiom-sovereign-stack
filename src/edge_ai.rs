@@ -8,7 +8,7 @@ impl EdgeAIPipeline {
     /// Processes 8 elements at a time for better throughput.
     pub fn quantize_int4(activations: &[f32]) -> Vec<u8> {
         let len = activations.len();
-        let mut quantized = Vec::with_capacity((len + 1) / 2);
+        let mut quantized = Vec::with_capacity(len.div_ceil(2));
 
         // Process 8 floats at a time (4 output bytes)
         let chunks = activations.chunks_exact(8);
