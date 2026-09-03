@@ -5,8 +5,7 @@
 //! 2. Point `AETHELARCH_LIB` / `AETHELARCH_INCLUDE` or use the `build.rs` hook.
 //! 3. Enable Cargo feature `aethelarch`.
 //!
-//! Until the native lib is linked, this module compiles as documentation +
-//! stub types only when the feature is off.
+//! Without the feature, stubs compile so the rest of the crate still builds.
 
 #![allow(dead_code)]
 
@@ -19,8 +18,7 @@ pub fn act_bytes(dim: usize) -> usize {
     (raw + 63) & !63
 }
 
-/// Opaque handle matching `aethelarch_matrix_t` layout (for documentation).
-/// Actual FFI uses raw pointers from the C library.
+/// C layout matching `aethelarch_matrix_t`.
 #[repr(C)]
 pub struct AethelarchMatrixRaw {
     pub rows: usize,
@@ -31,18 +29,16 @@ pub struct AethelarchMatrixRaw {
     pub scale: c_float,
 }
 
-/// Safe owned matrix wrapper (requires linked libaethelarch).
+/// Safe owned matrix wrapper.
 pub struct AethelarchMatrix {
     raw: *mut AethelarchMatrixRaw,
 }
 
-// Safety: matrix is immutable after encode; C lib is thread-safe for concurrent reads.
 unsafe impl Send for AethelarchMatrix {}
 unsafe impl Sync for AethelarchMatrix {}
 
 impl AethelarchMatrix {
-    /// Allocate a new matrix. Returns None on OOM or invalid dims.
-    /// Requires `aethelarch` feature + linked native library.
+    /// Allocate an empty matrix (weights zeroed). Requires native lib.
     #[cfg(feature = "aethelarch")]
     pub fn new(rows: usize, cols: usize) -> Option<Self> {
         unsafe {
@@ -60,6 +56,58 @@ impl AethelarchMatrix {
         None
     }
 
+    /// Allocate and encode ternary weights in one step.
+    /// `ternary` must be row-major, length `rows * cols`, values in {{-1, 0, 1}}.
+    pub fn from_ternary(rows: usize, cols: usize, ternary: &[i8]) -> Option<Self> {
+        if ternary.len() != rows.checked_mul(cols)? {
+            return None;
+        }
+        let mat = Self::new(rows, cols)?;
+        if !mat.encode_dense(ternary) {
+            return None;
+        }
+        Some(mat)
+    }
+
+    /// Encode ternary weights {{-1,0,+1}} into dual bitplanes.
+    /// Returns false on size mismatch, invalid values, or disjointness violation.
+    pub fn encode_dense(&self, ternary: &[i8]) -> bool {
+        if self.raw.is_null() {
+            return false;
+        }
+        let rows = self.rows();
+        let cols = self.cols();
+        if ternary.len() != rows * cols {
+            return false;
+        }
+        #[cfg(feature = "aethelarch")]
+        unsafe {
+            return aethelarch_encode_dense(self.raw, ternary.as_ptr(), rows, cols);
+        }
+        #[cfg(not(feature = "aethelarch"))]
+        {
+            let _ = ternary;
+            false
+        }
+    }
+
+    /// Set uniform scale applied in GEMV.
+    pub fn set_scale(&self, scale: f32) {
+        if self.raw.is_null() {
+            return;
+        }
+        unsafe {
+            (*self.raw).scale = scale;
+        }
+    }
+
+    pub fn scale(&self) -> f32 {
+        if self.raw.is_null() {
+            return 1.0;
+        }
+        unsafe { (*self.raw).scale }
+    }
+
     pub fn rows(&self) -> usize {
         if self.raw.is_null() {
             return 0;
@@ -72,6 +120,10 @@ impl AethelarchMatrix {
             return 0;
         }
         unsafe { (*self.raw).cols }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        !self.raw.is_null()
     }
 }
 
@@ -104,9 +156,12 @@ pub fn quantize_activation(activations: &[f32]) -> Vec<u8> {
     bits
 }
 
-/// Run GEMV if matrix and native lib are available.
+/// GEMV: `out = scale * W * act_bits`.
 pub fn gemv(mat: &AethelarchMatrix, act_bits: &[u8], out: &mut [f32]) -> bool {
     if mat.raw.is_null() || out.len() < mat.rows() {
+        return false;
+    }
+    if act_bits.len() < act_bytes(mat.cols()) {
         return false;
     }
     #[cfg(feature = "aethelarch")]
@@ -120,9 +175,6 @@ pub fn gemv(mat: &AethelarchMatrix, act_bits: &[u8], out: &mut [f32]) -> bool {
     }
 }
 
-// ---------------------------------------------------------------------------
-// FFI declarations (only linked when feature = "aethelarch")
-// ---------------------------------------------------------------------------
 #[cfg(feature = "aethelarch")]
 extern "C" {
     fn aethelarch_matrix_create(rows: usize, cols: usize) -> *mut AethelarchMatrixRaw;
