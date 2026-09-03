@@ -9,4 +9,7 @@ pub use cosmic_queue::PacketFrame;
 pub use edge_ai::EdgeAIPipeline;
 pub use axiom::PredatorGate;
 pub use crypto::{BwpMsmAccumulator, BssDecoder};
-pub use ffi::{AethelarchMatrix, quantize_activation, gemv, act_bytes};
+pub use ffi::{
+    act_bytes, gemv, quantize_activation, AethelarchError, AethelarchMatrix, AethelarchResult,
+    EncodeFailure,
+};

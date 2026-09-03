@@ -2,15 +2,119 @@
 //!
 //! ## Build
 //! 1. Build https://github.com/redbrickyarl-web/aethelarch as a static lib.
-//! 2. Point `AETHELARCH_LIB` / `AETHELARCH_INCLUDE` or use the `build.rs` hook.
+//! 2. Set `AETHELARCH_LIB` / `AETHELARCH_INCLUDE` (see `build.rs`).
 //! 3. Enable Cargo feature `aethelarch`.
 //!
-//! Without the feature, stubs compile so the rest of the crate still builds.
+//! Without the feature, methods return `AethelarchError::NativeUnavailable`.
 
 #![allow(dead_code)]
 
+use std::fmt;
 use std::os::raw::{c_float, c_int};
 use std::ptr;
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/// Structured errors for the Aethelarch FFI layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AethelarchError {
+    /// `rows` or `cols` was zero, or `rows * cols` overflowed.
+    InvalidDimensions { rows: usize, cols: usize },
+
+    /// Native allocation failed (OOM or invalid request).
+    AllocationFailed { rows: usize, cols: usize },
+
+    /// `ternary.len()` does not equal `rows * cols`.
+    WeightLengthMismatch {
+        expected: usize,
+        actual: usize,
+    },
+
+    /// Encode rejected input (invalid ternary value or +1/−1 overlap).
+    EncodeFailed {
+        reason: EncodeFailure,
+    },
+
+    /// Matrix handle is null / already freed.
+    InvalidMatrix,
+
+    /// Activation bit buffer shorter than `act_bytes(cols)`.
+    ActivationBufferTooShort {
+        required: usize,
+        actual: usize,
+    },
+
+    /// Output buffer shorter than `rows`.
+    OutputBufferTooShort {
+        required: usize,
+        actual: usize,
+    },
+
+    /// Built without `--features aethelarch` or native lib not linked.
+    NativeUnavailable,
+
+    /// Native `gemv` returned failure (null inputs inside C).
+    GemvFailed,
+}
+
+/// Why `encode_dense` / `from_ternary` failed after length checks passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncodeFailure {
+    /// C layer returned false (invalid value outside {{-1,0,1}} or disjointness).
+    NativeReject,
+    /// Feature off or matrix invalid.
+    Unavailable,
+}
+
+impl fmt::Display for AethelarchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidDimensions { rows, cols } => {
+                write!(f, "invalid matrix dimensions {rows}x{cols}")
+            }
+            Self::AllocationFailed { rows, cols } => {
+                write!(f, "failed to allocate {rows}x{cols} Aethelarch matrix")
+            }
+            Self::WeightLengthMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "ternary weight length mismatch: expected {expected}, got {actual}"
+                )
+            }
+            Self::EncodeFailed { reason } => write!(f, "encode failed: {reason:?}"),
+            Self::InvalidMatrix => write!(f, "invalid or null matrix handle"),
+            Self::ActivationBufferTooShort { required, actual } => {
+                write!(
+                    f,
+                    "activation buffer too short: need {required} bytes, got {actual}"
+                )
+            }
+            Self::OutputBufferTooShort { required, actual } => {
+                write!(
+                    f,
+                    "output buffer too short: need {required} floats, got {actual}"
+                )
+            }
+            Self::NativeUnavailable => {
+                write!(
+                    f,
+                    "Aethelarch native library unavailable (build with --features aethelarch and link libaethelarch)"
+                )
+            }
+            Self::GemvFailed => write!(f, "native gemv failed"),
+        }
+    }
+}
+
+impl std::error::Error for AethelarchError {}
+
+pub type AethelarchResult<T> = Result<T, AethelarchError>;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 /// Byte length required for an activation mask of `dim` bits (64-byte padded).
 pub fn act_bytes(dim: usize) -> usize {
@@ -18,7 +122,18 @@ pub fn act_bytes(dim: usize) -> usize {
     (raw + 63) & !63
 }
 
-/// C layout matching `aethelarch_matrix_t`.
+fn checked_elems(rows: usize, cols: usize) -> AethelarchResult<usize> {
+    if rows == 0 || cols == 0 {
+        return Err(AethelarchError::InvalidDimensions { rows, cols });
+    }
+    rows.checked_mul(cols)
+        .ok_or(AethelarchError::InvalidDimensions { rows, cols })
+}
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
 #[repr(C)]
 pub struct AethelarchMatrixRaw {
     pub rows: usize,
@@ -29,7 +144,6 @@ pub struct AethelarchMatrixRaw {
     pub scale: c_float,
 }
 
-/// Safe owned matrix wrapper.
 pub struct AethelarchMatrix {
     raw: *mut AethelarchMatrixRaw,
 }
@@ -38,74 +152,93 @@ unsafe impl Send for AethelarchMatrix {}
 unsafe impl Sync for AethelarchMatrix {}
 
 impl AethelarchMatrix {
-    /// Allocate an empty matrix (weights zeroed). Requires native lib.
-    #[cfg(feature = "aethelarch")]
-    pub fn new(rows: usize, cols: usize) -> Option<Self> {
-        unsafe {
-            let p = aethelarch_matrix_create(rows, cols);
-            if p.is_null() {
-                None
-            } else {
-                Some(Self { raw: p })
+    /// Allocate an empty matrix (weights zeroed).
+    pub fn new(rows: usize, cols: usize) -> AethelarchResult<Self> {
+        checked_elems(rows, cols)?;
+
+        #[cfg(feature = "aethelarch")]
+        {
+            unsafe {
+                let p = aethelarch_matrix_create(rows, cols);
+                if p.is_null() {
+                    return Err(AethelarchError::AllocationFailed { rows, cols });
+                }
+                Ok(Self { raw: p })
             }
         }
+
+        #[cfg(not(feature = "aethelarch"))]
+        {
+            let _ = (rows, cols);
+            Err(AethelarchError::NativeUnavailable)
+        }
     }
 
-    #[cfg(not(feature = "aethelarch"))]
-    pub fn new(_rows: usize, _cols: usize) -> Option<Self> {
-        None
-    }
-
-    /// Allocate and encode ternary weights in one step.
-    /// `ternary` must be row-major, length `rows * cols`, values in {{-1, 0, 1}}.
-    pub fn from_ternary(rows: usize, cols: usize, ternary: &[i8]) -> Option<Self> {
-        if ternary.len() != rows.checked_mul(cols)? {
-            return None;
+    /// Allocate and encode ternary weights (row-major, values in {{-1, 0, 1}}).
+    pub fn from_ternary(rows: usize, cols: usize, ternary: &[i8]) -> AethelarchResult<Self> {
+        let expected = checked_elems(rows, cols)?;
+        if ternary.len() != expected {
+            return Err(AethelarchError::WeightLengthMismatch {
+                expected,
+                actual: ternary.len(),
+            });
         }
         let mat = Self::new(rows, cols)?;
-        if !mat.encode_dense(ternary) {
-            return None;
-        }
-        Some(mat)
+        mat.encode_dense(ternary)?;
+        Ok(mat)
     }
 
-    /// Encode ternary weights {{-1,0,+1}} into dual bitplanes.
-    /// Returns false on size mismatch, invalid values, or disjointness violation.
-    pub fn encode_dense(&self, ternary: &[i8]) -> bool {
+    /// Encode ternary weights into dual bitplanes.
+    pub fn encode_dense(&self, ternary: &[i8]) -> AethelarchResult<()> {
         if self.raw.is_null() {
-            return false;
+            return Err(AethelarchError::InvalidMatrix);
         }
         let rows = self.rows();
         let cols = self.cols();
-        if ternary.len() != rows * cols {
-            return false;
+        let expected = rows * cols;
+        if ternary.len() != expected {
+            return Err(AethelarchError::WeightLengthMismatch {
+                expected,
+                actual: ternary.len(),
+            });
         }
+
         #[cfg(feature = "aethelarch")]
-        unsafe {
-            return aethelarch_encode_dense(self.raw, ternary.as_ptr(), rows, cols);
+        {
+            let ok = unsafe { aethelarch_encode_dense(self.raw, ternary.as_ptr(), rows, cols) };
+            if ok {
+                Ok(())
+            } else {
+                Err(AethelarchError::EncodeFailed {
+                    reason: EncodeFailure::NativeReject,
+                })
+            }
         }
+
         #[cfg(not(feature = "aethelarch"))]
         {
             let _ = ternary;
-            false
+            Err(AethelarchError::EncodeFailed {
+                reason: EncodeFailure::Unavailable,
+            })
         }
     }
 
-    /// Set uniform scale applied in GEMV.
-    pub fn set_scale(&self, scale: f32) {
+    pub fn set_scale(&self, scale: f32) -> AethelarchResult<()> {
         if self.raw.is_null() {
-            return;
+            return Err(AethelarchError::InvalidMatrix);
         }
         unsafe {
             (*self.raw).scale = scale;
         }
+        Ok(())
     }
 
-    pub fn scale(&self) -> f32 {
+    pub fn scale(&self) -> AethelarchResult<f32> {
         if self.raw.is_null() {
-            return 1.0;
+            return Err(AethelarchError::InvalidMatrix);
         }
-        unsafe { (*self.raw).scale }
+        Ok(unsafe { (*self.raw).scale })
     }
 
     pub fn rows(&self) -> usize {
@@ -138,6 +271,7 @@ impl Drop for AethelarchMatrix {
 }
 
 /// Quantize f32 activations to a padded 1-bit mask.
+/// Always succeeds; uses pure-Rust path when native lib is absent.
 pub fn quantize_activation(activations: &[f32]) -> Vec<u8> {
     let nbytes = act_bytes(activations.len());
     let mut bits = vec![0u8; nbytes];
@@ -157,21 +291,44 @@ pub fn quantize_activation(activations: &[f32]) -> Vec<u8> {
 }
 
 /// GEMV: `out = scale * W * act_bits`.
-pub fn gemv(mat: &AethelarchMatrix, act_bits: &[u8], out: &mut [f32]) -> bool {
-    if mat.raw.is_null() || out.len() < mat.rows() {
-        return false;
+pub fn gemv(
+    mat: &AethelarchMatrix,
+    act_bits: &[u8],
+    out: &mut [f32],
+) -> AethelarchResult<()> {
+    if mat.raw.is_null() {
+        return Err(AethelarchError::InvalidMatrix);
     }
-    if act_bits.len() < act_bytes(mat.cols()) {
-        return false;
+    let rows = mat.rows();
+    let cols = mat.cols();
+    let need_act = act_bytes(cols);
+    if act_bits.len() < need_act {
+        return Err(AethelarchError::ActivationBufferTooShort {
+            required: need_act,
+            actual: act_bits.len(),
+        });
     }
+    if out.len() < rows {
+        return Err(AethelarchError::OutputBufferTooShort {
+            required: rows,
+            actual: out.len(),
+        });
+    }
+
     #[cfg(feature = "aethelarch")]
-    unsafe {
-        return aethelarch_gemv(out.as_mut_ptr(), mat.raw, act_bits.as_ptr());
+    {
+        let ok = unsafe { aethelarch_gemv(out.as_mut_ptr(), mat.raw, act_bits.as_ptr()) };
+        if ok {
+            Ok(())
+        } else {
+            Err(AethelarchError::GemvFailed)
+        }
     }
+
     #[cfg(not(feature = "aethelarch"))]
     {
         let _ = act_bits;
-        false
+        Err(AethelarchError::NativeUnavailable)
     }
 }
 

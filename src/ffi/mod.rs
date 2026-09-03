@@ -6,5 +6,6 @@
 pub mod aethelarch;
 
 pub use aethelarch::{
-    act_bytes, gemv, quantize_activation, AethelarchMatrix,
+    act_bytes, gemv, quantize_activation, AethelarchError, AethelarchMatrix, AethelarchResult,
+    EncodeFailure,
 };
