@@ -2,6 +2,11 @@
 name = "axiom-sovereign-stack"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
+
+[features]
+default = []
+aethelarch = []
 
 [dependencies]
 crossbeam-queue = "0.3"
