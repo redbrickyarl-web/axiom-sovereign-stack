@@ -1,39 +1,25 @@
-# Integrating Aethelarch into Axiom Sovereign Stack
+# Aethelarch integration (turnkey)
 
-## Overview
+Native sources are vendored under `native/aethelarch/`.
 
-[Aethelarch](https://github.com/redbrickyarl-web/aethelarch) is the dual-bitplane ternary GEMV microkernel.
-This repo consumes it via FFI under `src/ffi/`.
-
-## Quick link steps
+## Build
 
 ```bash
-# 1. Build Aethelarch
-git clone https://github.com/redbrickyarl-web/aethelarch.git
-cd aethelarch && mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release && make -j
-
-# 2. Build this crate with the feature
-export AETHELARCH_LIB=$(pwd)          # dir with libaethelarch.a
-export AETHELARCH_INCLUDE=../include
-cd /path/to/axiom-sovereign-stack
 cargo build --features aethelarch
 ```
 
-## Module map
+No environment variables required. The `cc` crate compiles:
 
-| Rust path | Role |
-|-----------|------|
-| `src/ffi/mod.rs` | FFI module root |
-| `src/ffi/aethelarch.rs` | Safe wrapper + extern C decls |
-| `build.rs` | Links `libaethelarch` when feature enabled |
+- `quantize.c` + `kernel_scalar.c` (always)
+- `kernel_neon.c` on `aarch64`
+- `kernel_avx512.c` on `x86_64` (when toolchain accepts AVX-512 VPOPCNTDQ flags)
 
-## Feature flag
+## API
 
-```toml
-[features]
-default = []
-aethelarch = []
-```
+See `src/ffi/aethelarch.rs`:
 
-Without the feature, the wrapper compiles as stubs (quantize falls back to pure Rust bit packing; gemv returns false).
+- `AethelarchMatrix::from_ternary` / `encode_dense`
+- `quantize_activation` / `gemv`
+- `AethelarchError` structured errors
+
+Standalone C library: https://github.com/redbrickyarl-web/aethelarch
